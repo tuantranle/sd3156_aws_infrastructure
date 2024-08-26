@@ -1,329 +1,237 @@
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "5.11.0"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = "2.10.1"
+    }
+  }
+}
+
 provider "aws" {
-  region     = var.region
-  access_key = var.access_key
-  secret_key = var.secret_key
+  region  = "us-east-1"
+  profile = "tuantranle"
+  default_tags {
+    tags = {
+      Project = "project"
+      Org     = "NT"
+    }
+  }
 }
-
-data "aws_availability_zones" "available" {
-  filter {
-    name   = "opt-in-status"
-    values = ["opt-in-not-required"]
+provider "helm" {
+  kubernetes {
+    host = aws_eks_cluster.this.endpoint
+    cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority.0.data)
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      args = ["eks", "get-token", "--cluster-name", aws_eks_cluster.this.name, "--profile", "tuantranle"]
+      command = "aws"
+    }
   }
 }
 
-locals {
-  cluster_name ="sd4650-devops-eks"
-}
-
-# VPC
-module "vpc" {
-  source  = "terraform-aws-modules/vpc/aws"
-  version = "5.0.0"
-
-  name = "sd4650-devops-vpc"
-  cidr = "10.0.0.0/16"
-  azs  = slice(data.aws_availability_zones.available.names, 0, 3)
-
-  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  public_subnets  = ["10.0.4.0/24"]
-
-  enable_nat_gateway   = true
-  single_nat_gateway   = false
+# Virtual network
+resource "aws_vpc" "msavnet" {
+  cidr_block = var.vnet_cidr_block
   enable_dns_hostnames = true
+  enable_dns_support = true
+  tags       = var.vpc_tags
+}
 
+resource "aws_subnet" "public" {
+  count = length(var.public_subnet_cidr)
 
+  vpc_id                                      = aws_vpc.msavnet.id
+  cidr_block                                  = var.public_subnet_cidr[count.index]
+  map_public_ip_on_launch                     = true
+  enable_resource_name_dns_a_record_on_launch = true
+  availability_zone                           = var.subnet_azs[count.index]
+  tags                                        = var.public_subnet_tags
+}
 
-  public_subnet_tags = {
-    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
-    "kubernetes.io/role/elb"                      = 1
+resource "aws_subnet" "private" {
+  count = length(var.private_subnet_cidr)
+
+  vpc_id     = aws_vpc.msavnet.id
+  cidr_block = var.private_subnet_cidr[count.index]
+  availability_zone = var.subnet_azs[count.index]
+  tags       = var.private_subnet_tags
+}
+
+resource "aws_internet_gateway" "this" {
+  vpc_id = aws_vpc.msavnet.id
+}
+
+resource "aws_route_table" "this" {
+  vpc_id = aws_vpc.msavnet.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.this.id
+  }
+}
+resource "aws_route_table_association" "public_internet" {
+  count = length(var.public_subnet_cidr)
+
+  subnet_id      = aws_subnet.public[count.index].id
+  route_table_id = aws_route_table.this.id
+}
+
+resource "aws_network_acl" "internet_acl" {
+  vpc_id     = aws_vpc.msavnet.id
+  subnet_ids = [for subnet in aws_subnet.public: subnet.id]
+
+  dynamic "ingress" {
+    for_each = var.public_acl_ingress
+    content {
+      from_port  = ingress.value["from_port"]
+      to_port    = ingress.value["to_port"]
+      rule_no    = ingress.value["rule_no"]
+      action     = ingress.value["action"]
+      protocol   = ingress.value["protocol"]
+      cidr_block = ingress.value["cidr_block"]
+    }
   }
 
-  private_subnet_tags = {
-    "kubernetes.io/cluster/${local.cluster_name}" = "shared"
-    "kubernetes.io/role/internal-elb"             = 1
+  egress {
+    from_port  = 0
+    to_port    = 0
+    rule_no    = 100
+    action     = "allow"
+    protocol   = -1
+    cidr_block = "0.0.0.0/0"
   }
 }
 
-#Create Security Group to allow port 22, 80, 443, 8080
-resource "aws_security_group" "allow_web" {
-  name        = "allow_web_traffic"
-  description = "Allow web inboundd traffic"
-  vpc_id      = module.vpc.vpc_id
+# EC2 Instance
+resource "aws_security_group" "ec2sg" {
+  name        = "Agentsg"
+  description = "CI/CD agent admin access"
+  vpc_id      = aws_vpc.msavnet.id
 
-  ingress {
-    description = "HTTPS from VPC"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [var.zero-address]
-  }
-
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = [var.zero-address]
-  }
-
-  ingress {
-    description = "HTTP"
-    from_port   = 8080
-    to_port     = 8080
-    protocol    = "tcp"
-    cidr_blocks = [var.zero-address]
-  }
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.zero-address]
+  dynamic "ingress" {
+    for_each = var.sg_ingress
+    content {
+      from_port   = ingress.value["from_port"]
+      to_port     = ingress.value["to_port"]
+      protocol    = ingress.value["protocol"]
+      cidr_blocks = [ingress.value["cidr_block"]]
+    }
   }
 
   egress {
     from_port   = 0
     to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = [var.zero-address]
+    protocol    = -1
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+resource "aws_key_pair" "ec2_ssh" {
+  key_name   = var.ssh_key_name
+  public_key = var.public_key
+}
+resource "aws_instance" "jenkins" {
+  ami                    = var.ami
+  instance_type          = "t2.micro"
+  key_name               = aws_key_pair.ec2_ssh.key_name
+  subnet_id              = aws_subnet.public[0].id
+  vpc_security_group_ids = [aws_security_group.ec2sg.id]
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = var.root_volume_size
   }
 
   tags = {
-    Name = "allow_tls"
+    "Name" = "Jenkins controller"
   }
 }
 
-# Create a network interface
-resource "aws_network_interface" "web-server-nic" {
-  subnet_id       = module.vpc.public_subnets[0]
-  private_ips     = ["10.0.4.50"]
-  security_groups = [aws_security_group.allow_web.id]
+resource "aws_ecr_repository" "msabackend" {
+  name = "massamplebackend"
+}
+resource "aws_ecr_repository" "msafrontend" {
+  name = "massamplefrontend"
 }
 
-# Assign an elastic IP
-resource "aws_eip" "one" {
-  network_interface         = aws_network_interface.web-server-nic.id
-  associate_with_private_ip = "10.0.4.50"
-
+# EKS cluster
+# Policy AmazonEKSClusterPolicy, AmazonEKSVPCResourceController
+data "aws_iam_role" "eksclusterrole" {
+  name = "AmazonEKSClusterRole"
 }
-
-# Create Ubuntu server
-resource "aws_instance" "web-server" {
-  ami               = "ami-0df4b2961410d4cff" 
-  instance_type     = "t3.small"
-  availability_zone = data.aws_availability_zones.available.names[0]
-  key_name          = "sd4650_ubuntu_keypair"
-  depends_on        = [aws_eip.one, aws_network_interface.web-server-nic]
-
-  network_interface {
-    network_interface_id = aws_network_interface.web-server-nic.id
-    device_index         = 0
-  }
-
-  user_data = <<-EOF
-                #!/bin/bash
-                sudo apt-get update
-                sudo apt-get install ca-certificates curl gnupg
-                sudo install -m 0755 -d /etc/apt/keyrings
-                curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-                sudo chmod a+r /etc/apt/keyrings/docker.gpg
-                echo \
-                    "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-                    "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
-                    sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-                sudo apt-get update
-                sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
-                sudo usermod -aG docker ubuntu
-                EOF
-
-  tags = {
-    Name = "Ubuntu"
+resource "aws_eks_cluster" "this" {
+  name     = var.eks_cluster_name
+  role_arn = data.aws_iam_role.eksclusterrole.arn
+  vpc_config {
+    subnet_ids          = [for subnet in aws_subnet.public : subnet.id]
+    public_access_cidrs = var.eks_public_access_cidrs
   }
 }
+resource "aws_eks_addon" "this" {
+  count = length(local.eks_add_ons)
 
-#ECR
-resource "aws_ecr_repository" "frontend_repo" {
-  name                 = "frontend"
-  image_tag_mutability = var.immutable_ecr_repositories ? "IMMUTABLE" : "MUTABLE"
-  force_delete         = true
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = {
-    Name  = "Frontend repository"
-    Group = "Practical DevOps assigment"
-  }
+  cluster_name = aws_eks_cluster.this.name
+  addon_name = local.eks_add_ons[count.index]
 }
 
-resource "aws_ecr_lifecycle_policy" "frontend_lifecycle_policy" {
-  repository = aws_ecr_repository.frontend_repo.name
-
-  policy = <<EOF
-            {
-                "rules": [
-                    {
-                        "rulePriority": 1,
-                        "description": "Expire images older than 14 days",
-                        "selection": {
-                            "tagStatus": "any",
-                            "countType": "sinceImagePushed",
-                            "countUnit": "days",
-                            "countNumber": 14
-                        },
-                        "action": {
-                            "type": "expire"
-                        }
-                    }
-                ]
-            }
-            EOF
+# Policy AmazonEC2ContainerRegistryReadOnly, AmazonEKS_CNI_Policy, AmazonEKSWorkerNodePolicy
+data "aws_iam_role" "eksnoderole" {
+  name = "AWSEKSNodeGroup"
+}
+resource "aws_eks_node_group" "this" {
+  cluster_name  = aws_eks_cluster.this.name
+  node_group_name = "eks-practcaldevops-nodegroup"
+  node_role_arn = data.aws_iam_role.eksnoderole.arn
+  scaling_config {
+    desired_size = 1
+    max_size     = 1
+    min_size     = 0
+  }
+  subnet_ids     = [for subnet in aws_subnet.public : subnet.id]
+  ami_type       = "AL2_x86_64"
+  disk_size      = 8
+  capacity_type  = "SPOT"
+  instance_types = ["t2.medium"]
 }
 
-resource "aws_ecr_repository_policy" "frontend_repo_policy" {
-  repository = aws_ecr_repository.frontend_repo.name
-  policy     = <<EOF
-  {
-    "Version": "2008-10-17",
-    "Statement": [
-      {
-        "Sid": "Set the permission for ECR",
-        "Effect": "Allow",
-        "Principal": "*",
-        "Action": [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:BatchGetImage",
-          "ecr:CompleteLayerUpload",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:GetLifecyclePolicy",
-          "ecr:InitiateLayerUpload",
-          "ecr:PutImage",
-          "ecr:UploadLayerPart"
-        ]
-      }
-    ]
-  }
-  EOF
-}
+resource "helm_release" "prometheus" {
+  name = "prometheus"
+  chart = "prometheus"
+  repository = "https://prometheus-community.github.io/helm-charts"
+  namespace = "prometheus"
+  create_namespace = true
+  cleanup_on_fail = true
 
-resource "aws_ecr_repository" "backend_repo" {
-  name                 = "backend"
-  image_tag_mutability = var.immutable_ecr_repositories ? "IMMUTABLE" : "MUTABLE"
-  force_delete         = true
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-
-  tags = {
-    Name  = "Backend repository"
-    Group = "Practical DevOps assigment"
-  }
-}
-
-resource "aws_ecr_lifecycle_policy" "backend_lifecycle_policy" {
-  repository = aws_ecr_repository.backend_repo.name
-
-  policy = <<EOF
-            {
-                "rules": [
-                    {
-                        "rulePriority": 1,
-                        "description": "Expire images older than 14 days",
-                        "selection": {
-                            "tagStatus": "any",
-                            "countType": "sinceImagePushed",
-                            "countUnit": "days",
-                            "countNumber": 14
-                        },
-                        "action": {
-                            "type": "expire"
-                        }
-                    }
-                ]
-            }
-            EOF
-}
-
-resource "aws_ecr_repository_policy" "backend_repo_policy" {
-  repository = aws_ecr_repository.backend_repo.name
-  policy     = <<EOF
-  {
-    "Version": "2008-10-17",
-    "Statement": [
-      {
-        "Sid": "Set the permission for ECR",
-        "Effect": "Allow",
-        "Principal": "*",
-        "Action": [
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:BatchGetImage",
-          "ecr:CompleteLayerUpload",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:GetLifecyclePolicy",
-          "ecr:InitiateLayerUpload",
-          "ecr:PutImage",
-          "ecr:UploadLayerPart"
-        ]
-      }
-    ]
-  }
-  EOF
-}
-
-#EKS
-module "eks" {
-  source  = "terraform-aws-modules/eks/aws"
-  version = "19.15.3"
-
-  cluster_name    = local.cluster_name
-  cluster_version = "1.27"
-
-  vpc_id                         = module.vpc.vpc_id
-  subnet_ids                     = module.vpc.private_subnets
-  cluster_endpoint_public_access = true
-  cluster_endpoint_private_access= false
-
-  eks_managed_node_group_defaults = {
-    ami_type = "AL2_x86_64"
-
-  }
-
-  eks_managed_node_groups = {
-    one = {
-      name = "node-group-1"
-
-      instance_types = ["t3.small"]
-
-      min_size     = 1
-      max_size     = 3
-      desired_size = 1
+  dynamic "set" {
+    for_each = var.prometheus_chart_values
+    
+    iterator = chart_value
+    content {
+      name = chart_value.value["name"]
+      value = chart_value.value["value"]
     }
   }
+
+  depends_on = [ aws_eks_node_group.this ]
 }
 
-data "aws_iam_policy" "ebs_csi_policy" {
-  arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
-}
+resource "helm_release" "grafana" {
+  name = "grafana"
+  chart = "grafana"
+  repository = "https://grafana.github.io/helm-charts"
+  namespace = "grafana"
+  create_namespace = true
+  cleanup_on_fail = true
 
-module "irsa-ebs-csi" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-assumable-role-with-oidc"
-  version = "4.7.0"
-
-  create_role                   = true
-  role_name                     = "AmazonEKSTFEBSCSIRole-${module.eks.cluster_name}"
-  provider_url                  = module.eks.oidc_provider
-  role_policy_arns              = [data.aws_iam_policy.ebs_csi_policy.arn]
-  oidc_fully_qualified_subjects = ["system:serviceaccount:kube-system:ebs-csi-controller-sa"]
-}
-
-resource "aws_eks_addon" "ebs-csi" {
-  cluster_name             = module.eks.cluster_name
-  addon_name               = "aws-ebs-csi-driver"
-  addon_version            = "v1.25.0-eksbuild.1"
-  service_account_role_arn = module.irsa-ebs-csi.iam_role_arn
-  tags = {
-    "eks_addon" = "ebs-csi"
-    "terraform" = "true"
+  dynamic "set" {
+    for_each = var.grafana_chart_values
+    iterator = chart_value
+    content {
+      name = chart_value.value["name"]
+      value = chart_value.value["value"]
+    }
   }
+
+  depends_on = [ aws_eks_node_group.this ]
 }

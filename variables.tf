@@ -1,35 +1,100 @@
-variable "zero-address" {
-  type    = string
-  default = "0.0.0.0/0"
-}
-
-variable "docker_image_tag" {
+variable "vnet_cidr_block" {
   type        = string
-  description = "This is the tag which will be used for the created image"
-  default     = "latest"
+  description = "The IPv4 CIDR block for the VPC."
 }
 
-variable "immutable_ecr_repositories" {
-  type    = bool
-  default = true
+variable "vpc_tags" {
+  type        = map(string)
+  default     = {}
+  description = "(Optional) A map of tags to assign to the resource."
 }
 
-variable "region" {
-  default = "ap-southeast-2"
+variable "public_subnet_cidr" {
+  type        = list(string)
+  default     = []
+  description = "(Optional) The IPv4 CIDR block for the public subnet."
 }
 
-variable "access_key" {
-  description = "Access key"
+variable "private_subnet_cidr" {
+  type        = list(string)
+  default     = []
+  description = "(Optional) The IPv4 CIDR block for the private subnet."
 }
 
-variable "secret_key" {
-  description = "Secret key"
+variable "subnet_azs" {
+  type = list(string)
+  default = null
+  description = "(Optional) AZ for the subnet."
 }
 
-variable "subnet_prefix" {
-  description = "Cidr block for subnet"
+variable "public_subnet_tags" {
+  type        = map(string)
+  default     = {}
+  description = "(Optional) A map of tags to assign to the resource."
 }
 
-variable "cluster_addons" {
-  description = "Cluster Addons"
+variable "private_subnet_tags" {
+  type        = map(string)
+  default     = {}
+  description = "(Optional) A map of tags to assign to the resource."
+}
+
+variable "ssh_key_name" {
+  type        = string
+  description = "(Optional) The name for the key pair. If neither key_name nor key_name_prefix is provided, Terraform will create a unique key name using the prefix terraform-."
+}
+
+variable "public_key" {
+  type        = string
+  description = "(Required) The public key material"
+}
+
+variable "public_acl_ingress" {
+  type        = list(map(string))
+  default     = []
+  description = "(Optional) Specifies an ingress rule."
+}
+
+variable "root_volume_size" {
+  type        = number
+  default     = null
+  description = "(Optional) Size of the volume in gibibytes (GiB)."
+}
+
+variable "ami" {
+  type        = string
+  description = "AMI to use for the instance."
+}
+
+variable "sg_ingress" {
+  type        = list(map(string))
+  default     = []
+  description = "(Optional) Specifies an ingress rule."
+}
+
+variable "eks_cluster_name" {
+  type        = string
+  description = "EKS cluster name"
+}
+
+variable "eks_public_access_cidrs" {
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+  description = "(Optional) List of CIDR blocks. Indicates which CIDR blocks can access the Amazon EKS public API server endpoint when enabled. EKS defaults this to a list with 0.0.0.0/0"
+}
+
+variable "grafana_chart_values" {
+  type        = list(map(string))
+  default     = []
+  description = "(Optional) List of custom values for Grafana Helm release"
+}
+
+variable "prometheus_chart_values" {
+  type        = list(map(string))
+  default     = []
+  description = "(Optional) List of custom values for Prometheus Helm release"
+}
+
+locals {
+  eks_add_ons = ["kube-proxy", "vpc-cni", "coredns"]
 }
